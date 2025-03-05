@@ -29,7 +29,7 @@ public sealed class WebpImageFormatDetector : IImageFormatDetector
     /// <param name="header">The header bytes.</param>
     /// <returns>True, if its a valid RIFF FourCC.</returns>
     private static bool IsRiffContainer(ReadOnlySpan<byte> header)
-        => header[..4].SequenceEqual(WebpConstants.RiffFourCc);
+        => RiffHelper.IdentifyHeader(header[..4]);
 
     /// <summary>
     /// Checks if 'WEBP' is present in the header.
@@ -37,5 +37,5 @@ public sealed class WebpImageFormatDetector : IImageFormatDetector
     /// <param name="header">The header bytes.</param>
     /// <returns>True, if its a webp file.</returns>
     private static bool IsWebpFile(ReadOnlySpan<byte> header)
-        => header.Slice(8, 4).SequenceEqual(WebpConstants.WebpHeader);
+        => header.Slice(8, 4).SequenceEqual(WebpConstants.WebpFormTypeFourCc);
 }

@@ -4,11 +4,16 @@
 using System.Buffers;
 using System.Buffers.Binary;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using System.Text;
+using SixLabors.ImageSharp.Formats.Bmp;
+using SixLabors.ImageSharp.Formats.Cur;
+using SixLabors.ImageSharp.Formats.Ico;
 using SixLabors.ImageSharp.Formats.Icon;
-using SixLabors.ImageSharp.Formats.Png;
+using SixLabors.ImageSharp.Formats.Webp;
 using SixLabors.ImageSharp.IO;
-using SixLabors.ImageSharp.Memory.Internals;
 using SixLabors.ImageSharp.Memory;
+using SixLabors.ImageSharp.Memory.Internals;
 using SixLabors.ImageSharp.Metadata;
 
 namespace SixLabors.ImageSharp.Formats.Ani;
@@ -33,37 +38,61 @@ internal class AniDecoderCore : ImageDecoderCore
     protected override Image<TPixel> Decode<TPixel>(BufferedReadStream stream, CancellationToken cancellationToken)
     {
         this.currentStream = stream;
-        this.ReadHeader();
+
+        Guard.IsTrue(this.currentStream.TryReadUnmanaged(out RiffOrListChunkHeader riffHeader), nameof(riffHeader), "Invalid RIFF header.");
+        long dataSize = riffHeader.Size;
+        long dataStartPosition = this.currentStream.Position;
+
+        if (!this.TryReadChunk(dataStartPosition, dataSize, out RiffChunkHeader riffChunkHeader) ||
+            (AniChunkType)riffChunkHeader.FourCc is not AniChunkType.AniH)
+        {
+            Guard.IsTrue(false, nameof(riffChunkHeader), "Missing ANIH chunk.");
+        }
+
         ImageMetadata metadata = new();
         AniMetadata aniMetadata = metadata.GetAniMetadata();
-        Image<TPixel>? image = null;
 
-        Span<byte> buffer = stackalloc byte[20];
+        if (this.currentStream.TryReadUnmanaged(out AniHeader result))
+        {
+            this.header = result;
+            aniMetadata.Width = result.Width;
+            aniMetadata.Height = result.Height;
+            aniMetadata.BitCount = result.BitCount;
+            aniMetadata.Planes = result.Planes;
+            aniMetadata.DisplayRate = result.DisplayRate;
+            aniMetadata.Flags = result.Flags;
+        }
+
+        Image<TPixel>? image = null;
+        List<Image> frames = [];
+        Span<uint> sequence = default;
+        Span<uint> rate = default;
 
         try
         {
-            while (this.TryReadChunk(buffer, out AniChunk chunk))
+            while (this.TryReadChunk(dataStartPosition, dataSize, out RiffChunkHeader chunk))
             {
-                try
+                switch ((AniChunkType)chunk.FourCc)
                 {
-                    switch (chunk.Type)
+                    case AniChunkType.Seq:
                     {
-                        case AniChunkType.Seq:
-
-                            break;
-                        case AniChunkType.Rate:
-
-                            break;
-                        case AniChunkType.List:
-
-                            break;
-                        default:
-                            break;
+                        using IMemoryOwner<byte> data = this.ReadChunkData(chunk.Size);
+                        sequence = MemoryMarshal.Cast<byte, uint>(data.Memory.Span);
+                        break;
                     }
-                }
-                finally
-                {
-                    chunk.Data?.Dispose();
+
+                    case AniChunkType.Rate:
+                    {
+                        using IMemoryOwner<byte> data = this.ReadChunkData(chunk.Size);
+                        rate = MemoryMarshal.Cast<byte, uint>(data.Memory.Span);
+                        break;
+                    }
+
+                    case AniChunkType.List:
+                        HandleListChunk();
+                        break;
+                    default:
+                        break;
                 }
             }
         }
@@ -73,111 +102,100 @@ internal class AniDecoderCore : ImageDecoderCore
             throw;
         }
 
-
         throw new NotImplementedException();
-    }
 
-    private void ReadSeq()
-    {
-
-    }
-
-    private bool TryReadChunk(Span<byte> buffer, out AniChunk chunk)
-    {
-        if (!this.TryReadChunkLength(buffer, out int length))
+        void HandleListChunk()
         {
-            // IEND
+            if (!this.currentStream.TryReadUnmanaged(out uint listType))
+            {
+                return;
+            }
+
+            switch ((AniListType)listType)
+            {
+                case AniListType.Fram:
+                {
+                    while (this.TryReadChunk(dataStartPosition, dataSize, out RiffChunkHeader chunk))
+                    {
+                        if ((AniListFrameType)chunk.FourCc == AniListFrameType.Icon)
+                        {
+                            long endPosition = this.currentStream.Position + chunk.Size;
+                            if (aniMetadata.Flags.HasFlag(AniHeaderFlags.IsIcon))
+                            {
+                                if (this.currentStream.TryReadUnmanaged(out IconDir dir))
+                                {
+                                    this.currentStream.Position -= Unsafe.SizeOf<IconDir>();
+
+                                    switch (dir.Type)
+                                    {
+                                        case IconFileType.CUR:
+                                            frames.Add(CurDecoder.Instance.Decode(this.Options,
+                                                this.currentStream));
+                                            break;
+                                        case IconFileType.ICO:
+                                            frames.Add(IcoDecoder.Instance.Decode(this.Options,
+                                                this.currentStream));
+                                            break;
+                                    }
+                                }
+                            }
+                            else
+                            {
+                                frames.Add(BmpDecoder.Instance.Decode(this.Options, this.currentStream));
+                            }
+
+                            this.currentStream.Position = endPosition;
+                        }
+                    }
+
+                    break;
+                }
+
+                case AniListType.Info:
+                {
+                    while (this.TryReadChunk(dataStartPosition, dataSize, out RiffChunkHeader chunk))
+                    {
+                        switch ((AniListInfoType)chunk.FourCc)
+                        {
+                            case AniListInfoType.INam:
+                            {
+                                using IMemoryOwner<byte> data = this.ReadChunkData(chunk.Size);
+                                aniMetadata.Name = Encoding.ASCII.GetString(data.Memory.Span).TrimEnd('\0');
+                                break;
+                            }
+
+                            case AniListInfoType.IArt:
+                            {
+                                using IMemoryOwner<byte> data = this.ReadChunkData(chunk.Size);
+                                aniMetadata.Artist = Encoding.ASCII.GetString(data.Memory.Span).TrimEnd('\0');
+                                break;
+                            }
+
+                            default:
+                                break;
+                        }
+                    }
+
+                    break;
+                }
+            }
+        }
+    }
+
+    private bool TryReadChunk(long startPosition, long size, out RiffChunkHeader chunk)
+    {
+        if (this.currentStream.Position - startPosition >= size)
+        {
             chunk = default;
             return false;
         }
 
-        while (length < 0)
-        {
-            // Not a valid chunk so try again until we reach a known chunk.
-            if (!this.TryReadChunkLength(buffer, out length))
-            {
-                // IEND
-                chunk = default;
-                return false;
-            }
-        }
-
-        AniChunkType type = this.ReadChunkType(buffer);
-
-        // A chunk might report a length that exceeds the length of the stream.
-        // Take the minimum of the two values to ensure we don't read past the end of the stream.
-        long position = this.currentStream.Position;
-        chunk = new AniChunk(
-            length: (int)Math.Min(length, this.currentStream.Length - position),
-            type: type,
-            data: this.ReadChunkData(length));
-
-        return true;
+        return this.currentStream.TryReadUnmanaged(out chunk);
     }
-
 
     protected override ImageInfo Identify(BufferedReadStream stream, CancellationToken cancellationToken)
     {
         throw new NotImplementedException();
-    }
-
-    private void ReadHeader()
-    {
-        // Skip the identifier
-        this.currentStream.Skip(12);
-        Span<byte> buffer = stackalloc byte[36];
-        _ = this.currentStream.Read(buffer);
-        this.header = AniHeader.Parse(buffer);
-    }
-
-    private void ReadSeq(Stream stream)
-    {
-        Span<byte> buffer = stackalloc byte[4];
-        int length = BinaryPrimitives.ReadInt32BigEndian(buffer);
-
-    }
-
-    /// <summary>
-    /// Attempts to read the length of the next chunk.
-    /// </summary>
-    /// <param name="buffer">Temporary buffer.</param>
-    /// <param name="result">The result length. If the return type is <see langword="false"/> this parameter is passed uninitialized.</param>
-    /// <returns>
-    /// Whether the length was read.
-    /// </returns>
-    [MethodImpl(InliningOptions.ShortMethod)]
-    private bool TryReadChunkLength(Span<byte> buffer, out int result)
-    {
-        if (this.currentStream.Read(buffer, 0, 4) == 4)
-        {
-            result = BinaryPrimitives.ReadInt32BigEndian(buffer);
-
-            return true;
-        }
-
-        result = 0;
-        return false;
-    }
-
-    /// <summary>
-    /// Identifies the chunk type from the chunk.
-    /// </summary>
-    /// <param name="buffer">Temporary buffer.</param>
-    /// <exception cref="ImageFormatException">
-    /// Thrown if the input stream is not valid.
-    /// </exception>
-    [MethodImpl(InliningOptions.ShortMethod)]
-    private AniChunkType ReadChunkType(Span<byte> buffer)
-    {
-        if (this.currentStream.Read(buffer, 0, 4) == 4)
-        {
-            return (AniChunkType)BinaryPrimitives.ReadUInt32BigEndian(buffer);
-        }
-
-        PngThrowHelper.ThrowInvalidChunkType();
-
-        // The IDE cannot detect the throw here.
-        return default;
     }
 
     /// <summary>
@@ -185,9 +203,9 @@ internal class AniDecoderCore : ImageDecoderCore
     /// </summary>
     /// <param name="length">The length of the chunk data to read.</param>
     [MethodImpl(InliningOptions.ShortMethod)]
-    private IMemoryOwner<byte> ReadChunkData(int length)
+    private IMemoryOwner<byte> ReadChunkData(uint length)
     {
-        if (length == 0)
+        if (length is 0)
         {
             return new BasicArrayBuffer<byte>([]);
         }
@@ -195,12 +213,11 @@ internal class AniDecoderCore : ImageDecoderCore
         // We rent the buffer here to return it afterwards in Decode()
         // We don't want to throw a degenerated memory exception here as we want to allow partial decoding
         // so limit the length.
-        length = (int)Math.Min(length, this.currentStream.Length - this.currentStream.Position);
-        IMemoryOwner<byte> buffer = this.configuration.MemoryAllocator.Allocate<byte>(length, AllocationOptions.Clean);
+        int len = (int)Math.Min(length, this.currentStream.Length - this.currentStream.Position);
+        IMemoryOwner<byte> buffer = this.configuration.MemoryAllocator.Allocate<byte>(len, AllocationOptions.Clean);
 
-        this.currentStream.Read(buffer.GetSpan(), 0, length);
+        this.currentStream.Read(buffer.GetSpan(), 0, len);
 
         return buffer;
     }
-
 }

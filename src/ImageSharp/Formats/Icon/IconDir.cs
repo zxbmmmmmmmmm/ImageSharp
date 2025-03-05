@@ -25,12 +25,7 @@ internal struct IconDir(ushort reserved, IconFileType type, ushort count)
     /// </summary>
     public ushort Count = count;
 
-    public IconDir(IconFileType type)
-        : this(type, 0)
-    {
-    }
-
-    public IconDir(IconFileType type, ushort count)
+    public IconDir(IconFileType type, ushort count = 0)
         : this(0, type, count)
     {
     }
@@ -38,6 +33,6 @@ internal struct IconDir(ushort reserved, IconFileType type, ushort count)
     public static IconDir Parse(ReadOnlySpan<byte> data)
         => MemoryMarshal.Cast<byte, IconDir>(data)[0];
 
-    public readonly unsafe void WriteTo(Stream stream)
+    public readonly void WriteTo(Stream stream)
         => stream.Write(MemoryMarshal.Cast<IconDir, byte>([this]));
 }

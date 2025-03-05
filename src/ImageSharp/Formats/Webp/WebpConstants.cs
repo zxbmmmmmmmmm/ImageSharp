@@ -34,33 +34,6 @@ internal static class WebpConstants
     public const byte Vp8LHeaderMagicByte = 0x2F;
 
     /// <summary>
-    /// The header bytes identifying RIFF file.
-    /// </summary>
-    public static readonly byte[] RiffFourCc =
-    {
-        0x52, // R
-        0x49, // I
-        0x46, // F
-        0x46 // F
-    };
-
-    /// <summary>
-    /// The header bytes identifying a Webp.
-    /// </summary>
-    public static readonly byte[] WebpHeader =
-    {
-        0x57, // W
-        0x45, // E
-        0x42, // B
-        0x50 // P
-    };
-
-    /// <summary>
-    /// The header bytes identifying a Webp.
-    /// </summary>
-    public const string WebpFourCc = "WEBP";
-
-    /// <summary>
     /// 3 bits reserved for version.
     /// </summary>
     public const int Vp8LVersionBits = 3;
@@ -319,4 +292,9 @@ internal static class WebpConstants
         -7, 8,
         -8, -9
     };
+
+    /// <summary>
+    /// Gets the header bytes identifying a Webp.
+    /// </summary>
+    public static ReadOnlySpan<byte> WebpFormTypeFourCc => "WEBP"u8;
 }
